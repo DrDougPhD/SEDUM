@@ -5,6 +5,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import routing.chitchat.ChitChatRouter;
+
 import core.Connection;
 import core.DTNHost;
 import core.Message;
@@ -15,7 +17,7 @@ import core.SimClock;
 
 public class SEDUMRouter extends ActiveRouter {
 	
-	private List<Integer> connectedNodesFromPreviousEpoch;
+		private List<Integer> connectedNodesFromPreviousEpoch;
 	private Map<Integer, DurationUtility> durationUtilities;
 	private int epochStart;
 	private Map<Integer, Integer> startingTimeOfConnection;
@@ -23,9 +25,6 @@ public class SEDUMRouter extends ActiveRouter {
 	private Map<Integer, Integer> lastConnectionTime;
 	private Map<Integer, Integer> lastUpdatedTime;
 
-	protected SEDUMRouter(ActiveRouter r) {
-		super(r);
-	}
 
 	private static final int DENIED = -22;
 	
@@ -37,15 +36,31 @@ public class SEDUMRouter extends ActiveRouter {
 	
 	private static Double WEIGHT_CONSTANT;
 	private static int EPOCH_DURATION;
+	
+	public SEDUMRouter(Settings s) {
+		super(s);
+	}
+	
+	public SEDUMRouter(ActiveRouter r) {
+		super(r);
+	}
+
+	@Override
+	public MessageRouter replicate() {
+		return new SEDUMRouter(this);
+	}
 
 	@Override
 	public void init(DTNHost host, List<MessageListener> mListeners) {
+		super.init(host, mListeners);
+		
 		connectedNodesFromPreviousEpoch = new ArrayList<Integer>();
 		durationUtilities = new HashMap<Integer, DurationUtility>();
 		epochStart = SimClock.getIntTime();
 		startingTimeOfConnection = new HashMap<Integer, Integer>();
 		lastUpdatedTime = new HashMap<Integer, Integer>();
 		lastConnectionTime = new HashMap<Integer, Integer>();
+		connectionDurations = new HashMap<Integer, Integer>();
 		
 		Settings s = new Settings(SEDUM_NS);
 		EPOCH_DURATION = s.getInt(EPOCH_DURATION_S, 1);
@@ -54,18 +69,34 @@ public class SEDUMRouter extends ActiveRouter {
 	
 	@Override
 	public void update() {
-
+		super.update();
+		
 		// If new time period has occurred
-		if (newTimeEpoch()) {			
+		if (newTimeEpoch()) {
+			boolean printStuff = (getHost().getAddress() == 35 || getHost().getAddress() == 36);
+			if (printStuff) {
+				System.out.printf("%d at time %d: update\n", getHost().getAddress(), SimClock.getIntTime());
+			}
+			
 			// Connections that are currently open have not seen an update of
 			//  direct durations. Update thoses now.
 			for (Connection c: getConnections()) {
 				Integer j = c.getOtherNode(getHost()).getAddress();
+				
+				if (printStuff) {
+					System.out.printf("\tConnection between %d and %d\n", getHost().getAddress(), j);
+				}
+				
 				updateCumulativeDuration(j);
+				startingTimeOfConnection.put(j, SimClock.getIntTime());
 			}
 			
 			// for each meeting node j in the last time period T
 			for (Integer j: connectedNodesFromPreviousEpoch) {
+				
+				if (printStuff) {
+					System.out.printf("\tUpdating utility for %d\n", j);
+				}
 				
 				// Calculate duration utility for current time period.
 				DurationUtility currentDurationUtility = calculateCurrentUtility(j);
@@ -83,6 +114,13 @@ public class SEDUMRouter extends ActiveRouter {
 			}
 			connectedNodesFromPreviousEpoch.clear();
 			connectionDurations.clear();
+			
+			// Connections that still persist after an update will still
+		    //  still be recognized as connected.
+			for (Connection c: getConnections()) {				
+				Integer j = c.getOtherNode(getHost()).getAddress();
+				connectedNodesFromPreviousEpoch.add(j);
+			}
 		}
 	}
 
@@ -123,6 +161,11 @@ public class SEDUMRouter extends ActiveRouter {
 	@Override
 	public void changedConnection(Connection con) {
 		//eta.iteration_marker(SimClock.getIntTime());
+		if (getHost().getAddress() == 35 || getHost().getAddress() == 36) {
+			if (con.getOtherNode(getHost()).getAddress() == 35 || con.getOtherNode(getHost()).getAddress() == 36) {
+				System.out.printf("%d at time %d: changedConnection to %s\n", getHost().getAddress(), SimClock.getIntTime(), con.isUp()? "UP":"DOWN");
+			}
+		}
 		
 		super.changedConnection(con);
 		DTNHost other = con.getOtherNode(getHost());
@@ -134,7 +177,7 @@ public class SEDUMRouter extends ActiveRouter {
 			Map<Integer, DurationUtility> neighborUtilities;
 			if (lastConnectionTime.containsKey(j)) {
 				neighborUtilities = ((SEDUMRouter) other.getRouter())
-					.getUtilitiesSince(lastConnectionTime.get(j));
+					.getUtilitiesSince(lastConnectionTime.get(j), getHost().getAddress());
 			} else {
 				neighborUtilities = ((SEDUMRouter) other.getRouter())
 					.getUtilities();
@@ -147,20 +190,22 @@ public class SEDUMRouter extends ActiveRouter {
 				// for each node k in updated utilities
 				DurationUtility directUtility = durationUtilities.get(j);
 				for (Integer k: neighborUtilities.keySet()) {
-					DurationUtility indirectUtility = neighborUtilities.get(k);
-					DurationUtility relayUtility = new IndirectDurationUtility(directUtility, indirectUtility, j);
-					
-					if (durationUtilities.containsKey(k)) {
+					if (getHost().getAddress() != k) {
+						DurationUtility indirectUtility = neighborUtilities.get(k);
+						DurationUtility relayUtility = new IndirectDurationUtility(directUtility, indirectUtility, j);
 						
-						// if u(i, j)*u(j, k) > u(i, k):
-						if (durationUtilities.get(k).isSmallerThan(relayUtility)) {
+						if (durationUtilities.containsKey(k)) {
 							
-						    // u(i,k) needs updating
+							// if u(i, j)*u(j, k) > u(i, k):
+							if (durationUtilities.get(k).isSmallerThan(relayUtility)) {
+								
+							    // u(i,k) needs updating
+								durationUtilities.put(k, relayUtility);
+							}
+							
+						} else {
 							durationUtilities.put(k, relayUtility);
 						}
-						
-					} else {
-						durationUtilities.put(k, relayUtility);
 					}
 				}
 			}
@@ -180,7 +225,14 @@ public class SEDUMRouter extends ActiveRouter {
 	private void updateCumulativeDuration(Integer j) {
 		int startingTime = startingTimeOfConnection.remove(j);
 		int duration = SimClock.getIntTime() - startingTime;
-		int cumulatedDuration = connectionDurations.get(j);
+		int cumulatedDuration;
+		
+		if (connectionDurations.containsKey(j)) {
+			cumulatedDuration = connectionDurations.get(j);
+		} else {
+			cumulatedDuration = 0;
+		}
+		
 		connectionDurations.put(j, duration + cumulatedDuration);
 		lastConnectionTime.put(j, SimClock.getIntTime());
 	}
@@ -189,13 +241,33 @@ public class SEDUMRouter extends ActiveRouter {
 		return durationUtilities;
 	}
 
-	private Map<Integer, DurationUtility> getUtilitiesSince(Integer startTime) {
+	private Map<Integer, DurationUtility> getUtilitiesSince(Integer startTime, int requester) {
 		// Build a map of duration utilities that have been updated since
 		//  the start time.
+		
+		boolean printStuff = (requester == 35 || requester == 36);
+		if (printStuff) {
+			System.out.printf("\tSTART TIME is %d\n", startTime);
+		}
+		
 		Map<Integer, DurationUtility> updatedUtilities = new HashMap<Integer, DurationUtility>();
 		for (Integer j: durationUtilities.keySet()) {
-			if (lastUpdatedTime.get(j) > startTime) {
-				updatedUtilities.put(j, durationUtilities.get(j));
+			if (j != requester) {
+				
+				if (printStuff) {
+					System.out.printf("\tUtility for %d was last updated at %d\n", j, lastUpdatedTime.get(j));
+				}
+				
+				
+				
+				if (lastUpdatedTime.get(j) > startTime) {
+					
+					if (printStuff) {
+						System.out.printf("\t%d is seeking duration utility for %d\n", getHost().getAddress(), j);
+					}
+					
+					updatedUtilities.put(j, durationUtilities.get(j));
+				}
 			}
 		}
 		return updatedUtilities;
@@ -234,11 +306,4 @@ public class SEDUMRouter extends ActiveRouter {
 		Message m = super.messageTransferred(id, from);
 		return m;
 	}
-	
-	@Override
-	public MessageRouter replicate() {
-		// TODO Auto-generated method stub
-		return null;
-	}
-
 }
