@@ -22,4 +22,8 @@ public class DurationUtility {
 			return new IndirectDurationUtility(updatedUtility, relay);
 		}
 	}
+
+  public String toString() {
+    return utility.toString() + (relay == null ? "" : " through " + relay.toString());
+  }
 }
