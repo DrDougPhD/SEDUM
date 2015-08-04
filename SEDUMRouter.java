@@ -2,10 +2,12 @@ package routing;
 
 import java.util.Collection;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.Set;
 
 import core.Connection;
@@ -77,8 +79,8 @@ public class SEDUMRouter extends ActiveRouter {
 
 	@Override
 	public void update() {
-		System.out.printf("%d at time %d: update\n", getHost().getAddress(), SimClock.getIntTime());
-		//super.update();
+		//System.out.printf("%d at time %d: update\n", getHost().getAddress(), SimClock.getIntTime());
+		super.update();
 
 		// If new time period has occurred
 		if (newTimeEpoch()) {
@@ -148,6 +150,13 @@ public class SEDUMRouter extends ActiveRouter {
 		this.tryAllMessagesToAllConnections();
 	}
 
+	/**
+	 * Calculate the duration utility for the previous time epoch between this
+	 * node and the node with address j. This calculation is based on Formula
+	 * 10 in the paper.
+	 * @param j The address of the neighboring node
+	 * @return the duration utility between this node and the j node
+	 */
 	private DurationUtility calculateCurrentUtility(Integer j) {
 		// Formula 10 in the paper.
 		DurationUtility maxDurationUtility = new DirectDurationUtility(
@@ -166,13 +175,26 @@ public class SEDUMRouter extends ActiveRouter {
 		return maxDurationUtility;
 	}
 
+	/**
+	 * Calculate the new duration utility, from the old duration utility and
+	 * the utility from the most recent time epoch, between this node and the
+	 * node with address j. This calculation is based on Formula 11 in the
+	 * paper.
+	 * @param j The address of the neighboring node
+	 * @param currentDurationUtility The duration utility of the most recent 
+	 * time epoch between this node and j.
+	 * @return the updated duration utility between this node and the j node
+	 */
 	private DurationUtility calculateUpdatedUtility(Integer j, DurationUtility currentDurationUtility) {
-		// Formula 11 in the paper
 		DurationUtility oldDurationUtility = durationUtilities.get(j);
 		return currentDurationUtility.updateFromOld(oldDurationUtility, WEIGHT_CONSTANT);
 	}
 
-
+	/**
+	 * Determine if a new time epoch has passed.
+	 * @return True if the current time is the start of a new time epoch.
+	 * False otherwise.
+	 */
 	private boolean newTimeEpoch() {
 		if (SimClock.getIntTime() == epochStart + EPOCH_DURATION) {
 			epochStart = SimClock.getIntTime();
@@ -182,19 +204,18 @@ public class SEDUMRouter extends ActiveRouter {
 		return false;
 	}
 
+	/**
+	 * Called when a connection state is altered. If a new connection is
+	 * established, the nodes exchange which message IDs are known to be
+	 * delivered and exchange and update utility tables.
+	 * @param con The altered connection
+	 */
 	@Override
 	public void changedConnection(Connection con) {
-		System.out.printf("%d at time %d: changedConnection to %s\n", getHost().getAddress(), SimClock.getIntTime(), con.isUp()? "UP":"DOWN");
-		//eta.iteration_marker(SimClock.getIntTime());
-		/*if (getHost().getAddress() == 36 || getHost().getAddress() == 13) {
-			if (con.getOtherNode(getHost()).getAddress() == 36 || con.getOtherNode(getHost()).getAddress() == 13) {
-				System.out.printf("%d at time %d: changedConnection to %s\n", getHost().getAddress(), SimClock.getIntTime(), con.isUp()? "UP":"DOWN");
-			}
-		}
-		 */
 		super.changedConnection(con);
 		DTNHost other = con.getOtherNode(getHost());
 		Integer j = other.getAddress();
+		
 		if (con.isUp()) {
 			// Exchange message IDs known to be delivered and delete them.
 			updateKnownDeliveredMessages(((SEDUMRouter) other.getRouter())
@@ -365,10 +386,7 @@ public class SEDUMRouter extends ActiveRouter {
 		
 			DurationUtility receiverUtility = (
 				(SEDUMRouter) con.getOtherNode(getHost()).getRouter()
-			).getUtilities().get(m.getTo());
-			if (receiverUtility == null) {
-				receiverUtility = new DirectDurationUtility(0.0);
-			}
+			).getUtilityFor(m.getTo().getAddress());
 			
 			// Iterate through all active connections and see if one has
 			//  a higher utility than the node at the other end of the provided
@@ -384,10 +402,7 @@ public class SEDUMRouter extends ActiveRouter {
 				
 				// Test if there exists a connected node that has a higher
 				//  duration utility.
-				DurationUtility neighborUtility = ((SEDUMRouter) neighbor.getRouter()).getUtilities().get(m.getTo().getAddress());
-				if (neighborUtility == null) {
-					neighborUtility = new DirectDurationUtility(0.0);
-				}
+				DurationUtility neighborUtility = ((SEDUMRouter) neighbor.getRouter()).getUtilityFor(m.getTo().getAddress());
 				if (receiverUtility.isSmallerThan(neighborUtility)) {
 					m.updateProperty("IS_CORE_REPLICA", false);
 					return;
@@ -420,23 +435,13 @@ public class SEDUMRouter extends ActiveRouter {
 			return false;
 		}
 
-		DurationUtility localUtility = durationUtilities.get(
-			m.getTo().getAddress()
-		);
-		
-		if (localUtility == null) {
-			localUtility = new DirectDurationUtility(0.0);
-		}
-
+		DurationUtility localUtility = getUtilityFor(m.getTo().getAddress());
 		if (localUtility.isRelayedBy(other.getAddress())) {
 			return true;
 		}
 
 		DurationUtility neighborUtility = ((SEDUMRouter) other.getRouter())
-				.getUtilities().get(m.getTo().getAddress());
-		if (neighborUtility == null) {
-			neighborUtility = new DirectDurationUtility(0.0);
-		}
+				.getUtilityFor(m.getTo().getAddress());
 		
 		if (localUtility.isSmallerThan(neighborUtility)) {
 			return true;
@@ -515,8 +520,108 @@ public class SEDUMRouter extends ActiveRouter {
 		return true;
 	}
 
+	/**
+	 * Remove enough low-utility messages from this node's buffer so that
+	 * m can fit into the buffer.
+	 * 
+	 * <p>
+	 * It is assumed that this node's buffer has at least one non-core replica.
+	 * The set of non-core replicas in this node's buffer are subject to
+	 * deletion based on the properties of m and the messages in the set.
+	 * <p>
+	 * 1. If the current free space of this node's buffer and the size of the
+	 * set of non-core replicas is smaller than the size of m, then nothing
+	 * will be done. m cannot be added to the buffer.
+	 * <p>
+	 * 2. If m is a core replica and there exists some non-core replicas in
+	 * the node's buffer that, if deleted, would permit m to fit, then the
+	 * non-core replicas with the smallest utilities will be deleted in order
+	 * to make space for m.
+	 * <p>
+	 * 3. If m is a non-core replica, then there needs to be enough non-core
+	 * replicas with utilities smaller than m in this node that can be deleted
+	 * in order to fit. 
+	 * 
+	 * @param m A new message that cannot fit in the buffer.
+	 */
 	private boolean removeLowestsUtilityMessagesToFit(Message m) {
-		return false;
+		int freeSpace = getFreeBufferSize();
+		if (freeSpace >= m.getSize()) {
+			return true;
+		}
+		
+		// Build a set of non-core replicas.
+		int sizeOfNonCoreReplicas = 0;
+		PriorityQueue<Message> nonCoreReplicas = new PriorityQueue<Message>(
+			getMessageCollection().size(),
+			new Comparator<Message>() {
+				@Override
+				public int compare(Message m1, Message m2) {
+					Integer m1_destination = m1.getTo().getAddress();
+					Integer m2_destination = m2.getTo().getAddress();
+					Double m1_utility = getUtilityFor(m1_destination).getUtility();
+					Double m2_utility = getUtilityFor(m2_destination).getUtility();
+					if (m1_utility == m2_utility) {
+						// Older messages should be deleted first.
+						return ((m1.getCreationTime() - m2.getCreationTime()) < 0 ? -1 : 1);
+					} else {
+						// Messages with lower utilities should be deleted first.
+						return ((m1_utility - m2_utility) < 0 ? -1 : 1 );
+					}
+				}
+			}
+		);
+		
+		if ((Boolean) m.getProperty("IS_CORE_REPLICA")) {
+			// Build up the non core replicas to include all non-core replicas.
+			for (Message localMessage: getMessageCollection()) {
+				boolean isNonCoreReplica = false == (Boolean) localMessage.getProperty("IS_CORE_REPLICA");
+				if (isNonCoreReplica) {
+					nonCoreReplicas.add(localMessage);
+					sizeOfNonCoreReplicas += localMessage.getSize();
+				}
+			}
+		} else {
+			// With m being a non-core replica, only messages with smaller
+			// utilities than that of m can be removed from the buffer.
+			DurationUtility utility = getUtilityFor(m.getTo().getAddress());
+			for (Message localMessage: getMessageCollection()) {
+				boolean isNonCoreReplica = false == (
+					(Boolean) localMessage.getProperty("IS_CORE_REPLICA")
+				);
+				boolean hasSmallerUtility = getUtilityFor(
+					localMessage.getTo().getAddress()
+				).isSmallerThan(utility);
+				
+				if (isNonCoreReplica && hasSmallerUtility) {
+					nonCoreReplicas.add(localMessage);
+					sizeOfNonCoreReplicas += localMessage.getSize();
+				}
+			}
+		}
+		
+		// Can we remove enough messages to guarantee free space for the
+		// new message?
+		if (sizeOfNonCoreReplicas + freeSpace < m.getSize()) {
+			return false;
+		}
+		
+		// Remove messages one by one until enough space has been freed
+		// from the local buffer.
+		while (freeSpace < m.getSize()) {
+			Message toRemove = nonCoreReplicas.poll();
+			freeSpace += toRemove.getSize();
+			deleteMessage(toRemove.getId(), true);
+		}
+		return true;
+	}
+
+	protected DurationUtility getUtilityFor(Integer j) {
+		if (durationUtilities.containsKey(j)) {
+			return durationUtilities.get(j);
+		} else {
+			return new DirectDurationUtility(0.0);
+		}
 	}
 
 	@Override
@@ -540,17 +645,22 @@ public class SEDUMRouter extends ActiveRouter {
 		return oldest;
 	}
 
-	public Map<String, Message> getKnownDeliveredMessages() {
-		return knownDeliveredMessages;
-	}
-
-	public void updateKnownDeliveredMessages(Map<String, Message> fromNeighbor) {
+	/**
+	 * Update the local node's set of known delivered messages based on a 
+	 * neighbor's known set, and delete any messages that are now known to
+	 * have been successfully delivered.
+	 * 
+	 * @param fromNeighbor The set of known delivered messages from this
+	 * node's neighbor.
+	 */
+	protected void updateKnownDeliveredMessages(Map<String, Message> fromNeighbor) {
 		// Merge the known delivered messages from the neighbor with this 
 		//  router.
 		knownDeliveredMessages.putAll(fromNeighbor);
 
 		// Delete any messages in the local buffer that are in this list.
-		for (Message m: getMessageCollection()) {
+		Collection<Message> copy = new ArrayList<Message>(getMessageCollection());
+		for (Message m: copy) {
 			if (fromNeighbor.containsKey(m.getId())) {
 				deleteMessage(m.getId(), false);
 			}
@@ -562,5 +672,9 @@ public class SEDUMRouter extends ActiveRouter {
 		m.addProperty("NUM_REPLICAS", NUM_REPLICAS);
 		m.addProperty("IS_CORE_REPLICA", false);
 		return super.createNewMessage(m);
+	}
+	
+	public Map<String, Message> getKnownDeliveredMessages() {
+		return knownDeliveredMessages;
 	}
 }
