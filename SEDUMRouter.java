@@ -419,6 +419,14 @@ public class SEDUMRouter extends ActiveRouter {
 		}
 	}
 
+	/**
+	 * Determine if a core replica for a message has been created by
+	 * the source node of the message.
+	 * 
+	 * @param id ID of message in question.
+	 * @return True if core replica of message has been created. False
+	 * otherwise.
+	 */
 	private boolean hasAllocatedCoreReplicaFor(String id) {
 		return coreReplicas.contains(id);
 	}
@@ -511,6 +519,11 @@ public class SEDUMRouter extends ActiveRouter {
 		return super.receiveMessage(m, from);
 	}
 
+	/**
+	 * Determine if there exists a non-core replica in this node's buffer.
+	 * @return True if all messages are core replicas, False if there exists
+	 * at least one non-core replica.
+	 */
 	private boolean allMessagesAreCoreReplicas() {
 		for (Message m: getMessageCollection()) {
 			if ((Boolean) m.getProperty("IS_CORE_REPLICA") == false) {
